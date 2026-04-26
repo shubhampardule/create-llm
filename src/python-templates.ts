@@ -874,10 +874,19 @@ def load_model_from_config(config_path: str = 'llm.config.js'):
         print(f"⚠️  Error reading tokenizer: {e}")
         print(f"   Using config vocab size: {config_vocab_size:,}")
     
-    # Get model size
+    # Get model type and size
+    model_type = model_config.get('type', 'gpt')
     size = model_config.get('size', 'small')
-    
-    # Create model based on size
+
+    # Route by architecture type first
+    if model_type == 'bert':
+        from .architectures.bert import create_bert_model
+        return create_bert_model(model_config)
+    elif model_type == 't5':
+        from .architectures.t5 import create_t5_model
+        return create_t5_model(model_config)
+
+    # GPT: route by size
     if size == 'nano':
         return nano.create_nano_model(model_config)
     elif size == 'tiny':
@@ -907,12 +916,578 @@ if __name__ == '__main__':
   }
 
   /**
+   * Get BERT model architecture template
+   */
+  static getBERTArchitecture(): string {
+    return `"""
+BERT-style transformer model architecture
+Configurable encoder-only (bidirectional) transformer for masked language modeling
+and downstream NLP tasks (classification, NER, QA).
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+
+class BERTConfig:
+    """Configuration for BERT model"""
+    def __init__(
+        self,
+        vocab_size: int = 32000,
+        max_length: int = 512,
+        layers: int = 6,
+        heads: int = 6,
+        dim: int = 384,
+        dropout: float = 0.1,
+        type_vocab_size: int = 2,       # segment A / segment B
+        pad_token_id: int = 0,
+    ):
+        self.vocab_size = vocab_size
+        self.max_length = max_length
+        self.layers = layers
+        self.heads = heads
+        self.dim = dim
+        self.dropout = dropout
+        self.type_vocab_size = type_vocab_size
+        self.pad_token_id = pad_token_id
+        self.head_dim = dim // heads
+
+        assert dim % heads == 0, f"dim ({dim}) must be divisible by heads ({heads})"
+
+
+class BERTEmbeddings(nn.Module):
+    """Token + position + token-type embeddings with LayerNorm"""
+
+    def __init__(self, config: BERTConfig):
+        super().__init__()
+        self.token_embedding    = nn.Embedding(config.vocab_size,      config.dim, padding_idx=config.pad_token_id)
+        self.position_embedding = nn.Embedding(config.max_length,      config.dim)
+        self.token_type_embedding = nn.Embedding(config.type_vocab_size, config.dim)
+        self.norm    = nn.LayerNorm(config.dim, eps=1e-12)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, input_ids, token_type_ids=None):
+        B, T = input_ids.shape
+        positions = torch.arange(T, device=input_ids.device).unsqueeze(0)
+
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+
+        x = (
+            self.token_embedding(input_ids)
+            + self.position_embedding(positions)
+            + self.token_type_embedding(token_type_ids)
+        )
+        return self.dropout(self.norm(x))
+
+
+class BERTAttention(nn.Module):
+    """Bidirectional (unmasked) multi-head self-attention"""
+
+    def __init__(self, config: BERTConfig):
+        super().__init__()
+        self.heads    = config.heads
+        self.head_dim = config.head_dim
+        self.dim      = config.dim
+
+        self.qkv     = nn.Linear(config.dim, 3 * config.dim)
+        self.proj    = nn.Linear(config.dim, config.dim)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x, attention_mask=None):
+        B, T, C = x.shape
+        qkv = self.qkv(x)
+        q, k, v = qkv.split(self.dim, dim=2)
+
+        q = q.view(B, T, self.heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.heads, self.head_dim).transpose(1, 2)
+
+        scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        # attention_mask: (B, T) with 1=keep, 0=pad  →  (B, 1, 1, T)
+        if attention_mask is not None:
+            scores = scores + (1.0 - attention_mask.float()).unsqueeze(1).unsqueeze(2) * -1e9
+
+        attn = self.dropout(F.softmax(scores, dim=-1))
+        out  = (attn @ v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.dropout(self.proj(out))
+
+
+class BERTLayer(nn.Module):
+    """Single BERT encoder layer: attention → FFN, both with pre-norm residuals"""
+
+    def __init__(self, config: BERTConfig):
+        super().__init__()
+        self.ln1  = nn.LayerNorm(config.dim, eps=1e-12)
+        self.attn = BERTAttention(config)
+        self.ln2  = nn.LayerNorm(config.dim, eps=1e-12)
+        self.fc1  = nn.Linear(config.dim, 4 * config.dim)
+        self.fc2  = nn.Linear(4 * config.dim, config.dim)
+        self.drop = nn.Dropout(config.dropout)
+
+    def forward(self, x, attention_mask=None):
+        x = x + self.attn(self.ln1(x), attention_mask)
+        residual = x
+        x = self.fc2(self.drop(F.gelu(self.fc1(self.ln2(x)))))
+        return residual + self.drop(x)
+
+
+class BERTModel(nn.Module):
+    """
+    BERT encoder stack.
+    Returns per-token hidden states and the pooled [CLS] representation.
+    """
+
+    def __init__(self, config: BERTConfig):
+        super().__init__()
+        self.config     = config
+        self.embeddings = BERTEmbeddings(config)
+        self.layers     = nn.ModuleList([BERTLayer(config) for _ in range(config.layers)])
+        self.pooler_fc  = nn.Linear(config.dim, config.dim)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if isinstance(module, nn.Linear) and module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None):
+        if input_ids.size(1) > self.config.max_length:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Truncating sequence from {input_ids.size(1)} to {self.config.max_length}"
+            )
+            input_ids = input_ids[:, :self.config.max_length]
+            if attention_mask  is not None: attention_mask  = attention_mask[:, :self.config.max_length]
+            if token_type_ids  is not None: token_type_ids  = token_type_ids[:, :self.config.max_length]
+
+        x = self.embeddings(input_ids, token_type_ids)
+        for layer in self.layers:
+            x = layer(x, attention_mask)
+
+        # Pooled output: tanh of the [CLS] (position 0) hidden state
+        pooled = torch.tanh(self.pooler_fc(x[:, 0]))
+        return {'last_hidden_state': x, 'pooler_output': pooled}
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters())
+
+
+class BERTForMaskedLM(nn.Module):
+    """BERT with a masked-language-modelling head for pre-training"""
+
+    def __init__(self, config: BERTConfig):
+        super().__init__()
+        self.bert    = BERTModel(config)
+        self.mlm_fc  = nn.Linear(config.dim, config.dim)
+        self.mlm_ln  = nn.LayerNorm(config.dim, eps=1e-12)
+        self.mlm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+        # Weight tying
+        self.mlm_head.weight = self.bert.embeddings.token_embedding.weight
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None, labels=None):
+        outputs = self.bert(input_ids, attention_mask, token_type_ids)
+        x       = outputs['last_hidden_state']
+        logits  = self.mlm_head(self.mlm_ln(F.gelu(self.mlm_fc(x))))
+
+        loss = None
+        if labels is not None:
+            # labels == -100 at non-masked positions → ignored by cross_entropy
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+
+        return {'logits': logits, 'loss': loss, 'pooler_output': outputs['pooler_output']}
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters())
+
+    def generate(self, *args, **kwargs):
+        """BERT is an encoder-only model and does not support autoregressive generation."""
+        raise NotImplementedError(
+            "BERT is an encoder-only (bidirectional) model and does not support autoregressive generation.\\n"
+            "Use model(input_ids, labels=masked_labels) for masked language modelling instead.\\n"
+            "For text generation, use a GPT or T5 model."
+        )
+
+
+def create_bert_model(config_dict: dict) -> BERTForMaskedLM:
+    """Create a BERT-for-MLM model from a config dictionary"""
+    config = BERTConfig(
+        vocab_size      = config_dict.get('vocab_size', 32000),
+        max_length      = config_dict.get('max_length', 512),
+        layers          = config_dict.get('layers', 6),
+        heads           = config_dict.get('heads', 6),
+        dim             = config_dict.get('dim', 384),
+        dropout         = config_dict.get('dropout', 0.1),
+        type_vocab_size = config_dict.get('type_vocab_size', 2),
+    )
+    model = BERTForMaskedLM(config)
+    print(f"Created BERT model with {model.count_parameters():,} parameters")
+    return model
+
+
+if __name__ == '__main__':
+    config = BERTConfig(vocab_size=32000, max_length=128, layers=4, heads=4, dim=256)
+    model  = BERTForMaskedLM(config)
+    print(f"Parameters: {model.count_parameters():,}")
+
+    B, T   = 2, 64
+    ids    = torch.randint(0, config.vocab_size, (B, T))
+    mask   = torch.ones(B, T, dtype=torch.long)
+    labels = ids.clone()
+    labels[:, ::2] = -100   # only predict every other token
+
+    out = model(ids, attention_mask=mask, labels=labels)
+    print(f"Logits: {out['logits'].shape}  Loss: {out['loss'].item():.4f}")
+`;
+  }
+
+  /**
+   * Get T5 model architecture template
+   */
+  static getT5Architecture(): string {
+    return `"""
+T5-style encoder-decoder transformer architecture
+Text-to-Text Transfer Transformer — frames every NLP task as seq2seq.
+Uses relative position biases, RMS LayerNorm, and gated GEGLU feed-forward.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+
+class T5Config:
+    """Configuration for T5 model"""
+    def __init__(
+        self,
+        vocab_size: int  = 32000,
+        max_length: int  = 512,
+        layers: int      = 6,       # applies to both encoder and decoder
+        heads: int       = 6,
+        dim: int         = 384,
+        ff_dim: int      = 0,       # 0 → auto (4 × dim)
+        dropout: float   = 0.1,
+        num_buckets: int = 32,      # relative position bias buckets
+        max_distance: int = 128,    # max relative distance for bias
+        pad_token_id: int = 0,
+        eos_token_id: int = 1,
+    ):
+        self.vocab_size   = vocab_size
+        self.max_length   = max_length
+        self.layers       = layers
+        self.heads        = heads
+        self.dim          = dim
+        self.ff_dim       = ff_dim if ff_dim > 0 else 4 * dim
+        self.dropout      = dropout
+        self.head_dim     = dim // heads
+        self.num_buckets  = num_buckets
+        self.max_distance = max_distance
+        self.pad_token_id = pad_token_id
+        self.eos_token_id = eos_token_id
+
+        assert dim % heads == 0, f"dim ({dim}) must be divisible by heads ({heads})"
+
+
+class T5RMSNorm(nn.Module):
+    """Root-mean-square layer norm (no bias, no mean subtraction — as in the T5 paper)"""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps    = eps
+
+    def forward(self, x):
+        rms = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
+        return (x.float() * rms).to(x.dtype) * self.weight
+
+
+class T5RelativePositionBias(nn.Module):
+    """Learned relative position bias — shared across all layers in encoder/decoder"""
+
+    def __init__(self, config: T5Config, bidirectional: bool):
+        super().__init__()
+        self.bidirectional = bidirectional
+        self.num_buckets   = config.num_buckets
+        self.max_distance  = config.max_distance
+        self.heads         = config.heads
+        self.bias_emb      = nn.Embedding(config.num_buckets, config.heads)
+
+    @staticmethod
+    def _bucket(relative_position, bidirectional, num_buckets, max_distance):
+        n    = -relative_position
+        half = num_buckets // 2
+        if bidirectional:
+            ret = (n < 0).long() * half
+            n   = n.abs()
+        else:
+            ret = torch.zeros_like(n)
+            n   = n.clamp(min=0)
+
+        max_exact = half // 2
+        is_small  = n < max_exact
+        val_if_large = max_exact + (
+            torch.log(n.float().clamp(min=1) / max_exact)
+            / math.log(max_distance / max_exact)
+            * (half - max_exact)
+        ).long().clamp(max=half - 1)
+        return ret + torch.where(is_small, n, val_if_large)
+
+    def forward(self, query_len, key_len, device):
+        q_pos = torch.arange(query_len, device=device).unsqueeze(1)
+        k_pos = torch.arange(key_len,   device=device).unsqueeze(0)
+        rel   = k_pos - q_pos                                          # (Q, K)
+        buckets = self._bucket(rel, self.bidirectional, self.num_buckets, self.max_distance)
+        bias  = self.bias_emb(buckets)                                 # (Q, K, H)
+        return bias.permute(2, 0, 1).unsqueeze(0)                      # (1, H, Q, K)
+
+
+class T5Attention(nn.Module):
+    """Multi-head attention with optional cross-attention and relative position bias"""
+
+    def __init__(self, config: T5Config, has_relative_bias: bool = False, bidirectional: bool = True):
+        super().__init__()
+        self.heads    = config.heads
+        self.head_dim = config.head_dim
+        self.dim      = config.dim
+
+        self.q = nn.Linear(config.dim, config.dim, bias=False)
+        self.k = nn.Linear(config.dim, config.dim, bias=False)
+        self.v = nn.Linear(config.dim, config.dim, bias=False)
+        self.o = nn.Linear(config.dim, config.dim, bias=False)
+
+        self.dropout = nn.Dropout(config.dropout)
+        self.pos_bias = T5RelativePositionBias(config, bidirectional) if has_relative_bias else None
+
+    def forward(self, x, key_value=None, attention_mask=None):
+        B, T, _ = x.shape
+        kv_src  = key_value if key_value is not None else x
+        S       = kv_src.size(1)
+
+        def split(t): return t.view(B, -1, self.heads, self.head_dim).transpose(1, 2)
+
+        q, k, v = split(self.q(x)), split(self.k(kv_src)), split(self.v(kv_src))
+        scores  = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)   # (B, H, T, S)
+
+        if self.pos_bias is not None:
+            scores = scores + self.pos_bias(T, S, x.device)
+
+        if attention_mask is not None:
+            scores = scores + (1.0 - attention_mask.float()).unsqueeze(1).unsqueeze(2) * -1e9
+
+        attn = self.dropout(F.softmax(scores, dim=-1))
+        out  = (attn @ v).transpose(1, 2).contiguous().view(B, T, self.dim)
+        return self.dropout(self.o(out))
+
+
+class T5FFN(nn.Module):
+    """Gated GEGLU feed-forward (T5v1.1 / Flan-T5 style)"""
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.wi_gate = nn.Linear(config.dim, config.ff_dim, bias=False)
+        self.wi_proj = nn.Linear(config.dim, config.ff_dim, bias=False)
+        self.wo      = nn.Linear(config.ff_dim, config.dim, bias=False)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        return self.dropout(self.wo(F.gelu(self.wi_gate(x)) * self.wi_proj(x)))
+
+
+class T5EncoderLayer(nn.Module):
+    def __init__(self, config: T5Config, has_relative_bias: bool = False):
+        super().__init__()
+        self.ln_attn = T5RMSNorm(config.dim)
+        self.attn    = T5Attention(config, has_relative_bias=has_relative_bias, bidirectional=True)
+        self.ln_ffn  = T5RMSNorm(config.dim)
+        self.ffn     = T5FFN(config)
+
+    def forward(self, x, attention_mask=None):
+        x = x + self.attn(self.ln_attn(x), attention_mask=attention_mask)
+        x = x + self.ffn(self.ln_ffn(x))
+        return x
+
+
+class T5DecoderLayer(nn.Module):
+    def __init__(self, config: T5Config, has_relative_bias: bool = False):
+        super().__init__()
+        self.ln_self = T5RMSNorm(config.dim)
+        self.self_attn = T5Attention(config, has_relative_bias=has_relative_bias, bidirectional=False)
+
+        self.ln_cross = T5RMSNorm(config.dim)
+        self.cross_attn = T5Attention(config, has_relative_bias=False, bidirectional=True)
+
+        self.ln_ffn = T5RMSNorm(config.dim)
+        self.ffn    = T5FFN(config)
+
+        # Pre-register causal mask as a buffer (avoids re-allocation every forward pass)
+        self.register_buffer(
+            'causal_mask',
+            torch.tril(torch.ones(config.max_length, config.max_length)).unsqueeze(0).unsqueeze(0)
+        )
+
+    def forward(self, x, encoder_hidden, decoder_mask=None, encoder_mask=None):
+        # Causal self-attention — slice pre-registered buffer instead of allocating
+        T = x.size(1)
+        causal = self.causal_mask[:, :, :T, :T]
+        if decoder_mask is not None:
+            causal = causal * decoder_mask.unsqueeze(1).unsqueeze(2)
+        x = x + self.self_attn(self.ln_self(x), attention_mask=causal)
+        # Cross-attention over encoder output
+        x = x + self.cross_attn(self.ln_cross(x), key_value=encoder_hidden, attention_mask=encoder_mask)
+        x = x + self.ffn(self.ln_ffn(x))
+        return x
+
+
+class T5Encoder(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            T5EncoderLayer(config, has_relative_bias=(i == 0))
+            for i in range(config.layers)
+        ])
+        self.final_norm = T5RMSNorm(config.dim)
+
+    def forward(self, x, attention_mask=None):
+        for layer in self.layers:
+            x = layer(x, attention_mask)
+        return self.final_norm(x)
+
+
+class T5Decoder(nn.Module):
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            T5DecoderLayer(config, has_relative_bias=(i == 0))
+            for i in range(config.layers)
+        ])
+        self.final_norm = T5RMSNorm(config.dim)
+
+    def forward(self, x, encoder_hidden, decoder_mask=None, encoder_mask=None):
+        for layer in self.layers:
+            x = layer(x, encoder_hidden, decoder_mask, encoder_mask)
+        return self.final_norm(x)
+
+
+class T5Model(nn.Module):
+    """
+    T5 encoder-decoder model.
+    Suitable for seq2seq tasks: summarisation, translation, QA, text generation.
+    """
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.config    = config
+        self.embedding = nn.Embedding(config.vocab_size, config.dim, padding_idx=config.pad_token_id)
+        self.encoder   = T5Encoder(config)
+        self.decoder   = T5Decoder(config)
+        self.lm_head   = nn.Linear(config.dim, config.vocab_size, bias=False)
+        # Weight tying: shared embedding for encoder, decoder input, and lm_head
+        self.lm_head.weight = self.embedding.weight
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def _truncate(self, ids, mask, name):
+        if ids.size(1) > self.config.max_length:
+            import logging
+            logging.getLogger(__name__).warning(f"Truncating {name} from {ids.size(1)} to {self.config.max_length}")
+            ids  = ids[:, :self.config.max_length]
+            mask = mask[:, :self.config.max_length] if mask is not None else None
+        return ids, mask
+
+    def forward(
+        self,
+        input_ids,
+        decoder_input_ids,
+        attention_mask=None,
+        decoder_attention_mask=None,
+        labels=None,
+    ):
+        input_ids,         attention_mask         = self._truncate(input_ids,         attention_mask,         'encoder')
+        decoder_input_ids, decoder_attention_mask = self._truncate(decoder_input_ids, decoder_attention_mask, 'decoder')
+
+        enc_hidden = self.encoder(self.embedding(input_ids), attention_mask)
+        dec_hidden = self.decoder(self.embedding(decoder_input_ids), enc_hidden, decoder_attention_mask, attention_mask)
+        logits     = self.lm_head(dec_hidden)
+
+        loss = None
+        if labels is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-100)
+
+        return {'logits': logits, 'loss': loss, 'encoder_hidden_state': enc_hidden}
+
+    def generate(self, input_ids, attention_mask=None, max_new_tokens=64, temperature=1.0, top_k=None):
+        """Greedy / top-k autoregressive decoding"""
+        self.eval()
+        B = input_ids.size(0)
+        enc_hidden = self.encoder(self.embedding(input_ids), attention_mask)
+        # Start with pad token as the first decoder input
+        dec_ids = torch.full((B, 1), self.config.pad_token_id, dtype=torch.long, device=input_ids.device)
+
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                dec_hidden = self.decoder(self.embedding(dec_ids), enc_hidden, encoder_mask=attention_mask)
+                logits     = self.lm_head(dec_hidden[:, -1, :]) / temperature
+                if top_k is not None:
+                    v, _   = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = float('-inf')
+                next_token = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+                dec_ids    = torch.cat([dec_ids, next_token], dim=1)
+                if (next_token == self.config.eos_token_id).all():
+                    break
+
+        return dec_ids[:, 1:]   # strip the initial pad token
+
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters())
+
+
+def create_t5_model(config_dict: dict) -> T5Model:
+    """Create T5 model from a config dictionary"""
+    config = T5Config(
+        vocab_size   = config_dict.get('vocab_size', 32000),
+        max_length   = config_dict.get('max_length', 512),
+        layers       = config_dict.get('layers', 6),
+        heads        = config_dict.get('heads', 6),
+        dim          = config_dict.get('dim', 384),
+        dropout      = config_dict.get('dropout', 0.1),
+    )
+    model = T5Model(config)
+    print(f"Created T5 model with {model.count_parameters():,} parameters")
+    return model
+
+
+if __name__ == '__main__':
+    config = T5Config(vocab_size=32000, max_length=128, layers=4, heads=4, dim=256)
+    model  = T5Model(config)
+    print(f"Parameters: {model.count_parameters():,}")
+
+    B, T_enc, T_dec = 2, 32, 16
+    enc_ids = torch.randint(1, config.vocab_size, (B, T_enc))
+    dec_ids = torch.randint(1, config.vocab_size, (B, T_dec))
+    labels  = dec_ids.clone(); labels[:, ::2] = -100
+
+    out = model(enc_ids, dec_ids, labels=labels)
+    print(f"Logits: {out['logits'].shape}  Loss: {out['loss'].item():.4f}")
+`;
+  }
+
+  /**
    * Get architectures __init__.py
    */
   static getArchitecturesInit(): string {
     return `"""
 Model architectures package
 """
+
+from importlib.util import find_spec
 
 from .gpt import GPTModel, GPTConfig, create_gpt_model
 from .nano import create_nano_model
@@ -929,6 +1504,25 @@ __all__ = [
     'create_small_model',
     'create_base_model',
 ]
+
+if find_spec(f"{__name__}.bert") is not None:
+    from .bert import BERTModel, BERTForMaskedLM, BERTConfig, create_bert_model
+
+    __all__.extend([
+        'BERTModel',
+        'BERTForMaskedLM',
+        'BERTConfig',
+        'create_bert_model',
+    ])
+
+if find_spec(f"{__name__}.t5") is not None:
+    from .t5 import T5Model, T5Config, create_t5_model
+
+    __all__.extend([
+        'T5Model',
+        'T5Config',
+        'create_t5_model',
+    ])
 `;
   }
 
@@ -941,25 +1535,14 @@ Models package
 """
 
 from .config import ConfigLoader, ConfigValidationError, load_model_from_config
-from .architectures import (
-    GPTModel,
-    GPTConfig,
-    create_gpt_model,
-    create_tiny_model,
-    create_small_model,
-    create_base_model,
-)
+from .architectures import *  # Re-export the architectures available in this scaffold.
+from .architectures import __all__ as _architecture_exports
 
 __all__ = [
     'ConfigLoader',
     'ConfigValidationError',
     'load_model_from_config',
-    'GPTModel',
-    'GPTConfig',
-    'create_gpt_model',
-    'create_tiny_model',
-    'create_small_model',
-    'create_base_model',
+    *_architecture_exports,
 ]
 `;
   }

@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Template, TemplateName } from './types/template';
+import { formatParameterCount } from './formatters';
 
 /**
  * Error thrown when template validation fails
@@ -348,7 +349,7 @@ export class TemplateManager {
     const { model, hardware, documentation } = template.config;
 
     return `${name.toUpperCase()} - ${documentation.description}
-  Parameters: ${(model.parameters / 1_000_000).toFixed(0)}M
+  Parameters: ${formatParameterCount(model.parameters)}
   Hardware: ${hardware.recommended_gpu}
   Training Time: ${hardware.estimated_training_time}
   CPU Compatible: ${hardware.can_run_on_cpu ? 'Yes' : 'No'}`;

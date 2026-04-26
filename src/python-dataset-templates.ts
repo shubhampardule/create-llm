@@ -222,7 +222,8 @@ def create_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     pin_memory: bool = True,
-    max_length: int = None
+    max_length: int = None,
+    drop_last: bool = False
 ):
     """
     Create DataLoader with optimal settings
@@ -234,6 +235,7 @@ def create_dataloader(
         num_workers: Number of worker processes
         pin_memory: Pin memory for faster GPU transfer
         max_length: Maximum sequence length (truncate if exceeded)
+        drop_last: Whether to drop the final incomplete batch
     
     Returns:
         DataLoader instance
@@ -241,17 +243,30 @@ def create_dataloader(
     from torch.utils.data import DataLoader
     
     def collate_fn(batch):
-        """Custom collate function with optional max_length truncation"""
-        # Stack tensors from batch
-        input_ids = torch.stack([item['input_ids'] for item in batch])
-        attention_mask = torch.stack([item['attention_mask'] for item in batch])
-        labels = torch.stack([item['labels'] for item in batch])
-        
-        # Apply max_length constraint if specified
-        if max_length is not None:
-            input_ids = input_ids[:, :max_length]
-            attention_mask = attention_mask[:, :max_length]
-            labels = labels[:, :max_length]
+        """Custom collate function with truncation and dynamic padding"""
+        from torch.nn.utils.rnn import pad_sequence
+
+        input_tensors = []
+        attention_tensors = []
+        label_tensors = []
+
+        for item in batch:
+            input_ids = item['input_ids']
+            attention_mask = item['attention_mask']
+            labels = item['labels']
+
+            if max_length is not None:
+                input_ids = input_ids[:max_length]
+                attention_mask = attention_mask[:max_length]
+                labels = labels[:max_length]
+
+            input_tensors.append(input_ids)
+            attention_tensors.append(attention_mask)
+            label_tensors.append(labels)
+
+        input_ids = pad_sequence(input_tensors, batch_first=True, padding_value=0)
+        attention_mask = pad_sequence(attention_tensors, batch_first=True, padding_value=0)
+        labels = pad_sequence(label_tensors, batch_first=True, padding_value=-100)
         
         return {
             'input_ids': input_ids,
@@ -265,8 +280,8 @@ def create_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory and torch.cuda.is_available(),
-        drop_last=True,  # Drop incomplete batches
-        collate_fn=collate_fn if max_length is not None else None
+        drop_last=drop_last,
+        collate_fn=collate_fn
     )
 
 

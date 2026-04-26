@@ -2,6 +2,7 @@ import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { TemplateManager } from './template-manager';
 import { TemplateName } from './types/template';
+import { formatParameterCount } from './formatters';
 
 export interface ProjectConfig {
   projectName: string;
@@ -55,12 +56,12 @@ export class CLIPrompts {
     const templates = this.templateManager.getAllTemplates();
     
     const choices = templates.map(template => {
-      const params = (template.config.model.parameters / 1_000_000).toFixed(0);
+      const params = formatParameterCount(template.config.model.parameters);
       const hardware = template.config.hardware.can_run_on_cpu ? 'CPU' : template.config.hardware.recommended_gpu;
       const time = template.config.hardware.estimated_training_time;
       
       return {
-        name: `${chalk.bold(template.name.toUpperCase())} - ${template.config.documentation.description}\n  ${chalk.gray(`${params}M params | ${hardware} | ${time}`)}`,
+        name: `${chalk.bold(template.name.toUpperCase())} - ${template.config.documentation.description}\n  ${chalk.gray(`${params} params | ${hardware} | ${time}`)}`,
         value: template.name,
         short: template.name
       };
@@ -132,6 +133,11 @@ export class CLIPrompts {
             name: `${chalk.bold('HuggingFace')} - ${chalk.gray('Easy model sharing and deployment')}`,
             value: 'huggingface',
             checked: false
+          },
+          {
+            name: `${chalk.bold('SynthexAI')} - ${chalk.gray('Synthetic data generation for training')}`,
+            value: 'synthex',
+            checked: false
           }
         ]
       }
@@ -150,7 +156,7 @@ export class CLIPrompts {
     console.log(chalk.gray('─'.repeat(50)));
     console.log(chalk.white(`  Project Name:  ${chalk.bold(config.projectName)}`));
     console.log(chalk.white(`  Template:      ${chalk.bold(config.template.toUpperCase())}`));
-    console.log(chalk.white(`  Model:         ${template.config.model.type.toUpperCase()} (${(template.config.model.parameters / 1_000_000).toFixed(0)}M parameters)`));
+    console.log(chalk.white(`  Model:         ${template.config.model.type.toUpperCase()} (${formatParameterCount(template.config.model.parameters)} parameters)`));
     console.log(chalk.white(`  Tokenizer:     ${chalk.bold(config.tokenizer.toUpperCase())}`));
     console.log(chalk.white(`  Hardware:      ${template.config.hardware.recommended_gpu}`));
     console.log(chalk.white(`  Training Time: ${template.config.hardware.estimated_training_time}`));
@@ -176,14 +182,44 @@ export class CLIPrompts {
   }
 
   /**
-   * Run full interactive prompt flow
+   * Run full interactive prompt flow.
+   * When skipAll is true, all prompts are bypassed and defaults are used:
+   *   project name → 'my-llm', template → 'small', tokenizer → 'bpe', plugins → []
    */
   async runInteractiveFlow(
     initialProjectName?: string,
     initialTemplate?: TemplateName,
     initialTokenizer?: string,
-    skipInstall?: boolean
+    skipInstall?: boolean,
+    skipAll?: boolean
   ): Promise<ProjectConfig | null> {
+    // Defaults used when --yes is passed
+    const DEFAULT_PROJECT_NAME: string = 'my-llm';
+    const DEFAULT_TEMPLATE: TemplateName = 'small';
+    const DEFAULT_TOKENIZER: 'bpe' | 'wordpiece' | 'unigram' = 'bpe';
+
+    if (skipAll) {
+      const config: ProjectConfig = {
+        projectName: initialProjectName || DEFAULT_PROJECT_NAME,
+        template:    initialTemplate   || DEFAULT_TEMPLATE,
+        tokenizer:   (initialTokenizer as 'bpe' | 'wordpiece' | 'unigram') ?? DEFAULT_TOKENIZER,
+        plugins:     [],
+        skipInstall: skipInstall || false
+      };
+
+      // Still show the summary so the user knows what was chosen
+      const resolvedTemplate = this.templateManager.getTemplate(config.template);
+      console.log(chalk.cyan('\n📋 Using defaults (--yes):'));
+      console.log(chalk.gray('─'.repeat(50)));
+      console.log(chalk.white(`  Project Name:  ${chalk.bold(config.projectName)}`));
+      console.log(chalk.white(`  Template:      ${chalk.bold(config.template.toUpperCase())} (${formatParameterCount(resolvedTemplate.config.model.parameters)} parameters)`));
+      console.log(chalk.white(`  Tokenizer:     ${chalk.bold(config.tokenizer.toUpperCase())}`));
+      console.log(chalk.white(`  Plugins:       ${chalk.gray('None')}`));
+      console.log(chalk.gray('─'.repeat(50) + '\n'));
+
+      return config;
+    }
+
     // Project name
     const projectName = initialProjectName || await this.promptProjectName();
 
@@ -191,7 +227,7 @@ export class CLIPrompts {
     const template = initialTemplate || await this.promptTemplate();
 
     // Tokenizer selection
-    const tokenizer = initialTokenizer as 'bpe' | 'wordpiece' | 'unigram' || await this.promptTokenizer();
+    const tokenizer = (initialTokenizer as 'bpe' | 'wordpiece' | 'unigram') ?? await this.promptTokenizer();
 
     // Plugins selection
     const plugins = await this.promptPlugins();

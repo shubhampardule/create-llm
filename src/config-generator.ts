@@ -1,5 +1,6 @@
 import { Template } from './types/template';
 import { ProjectConfig } from './prompts';
+import { formatParameterCount } from './formatters';
 
 /**
  * ConfigGenerator creates llm.config.js files based on templates
@@ -214,7 +215,7 @@ export class ConfigGenerator {
     lines.push(' * Configuration Tips:');
     lines.push(' * ');
     lines.push(` * Template: ${template.name.toUpperCase()}`);
-    lines.push(` * Parameters: ${(template.config.model.parameters / 1_000_000).toFixed(0)}M`);
+    lines.push(` * Parameters: ${formatParameterCount(template.config.model.parameters)}`);
     lines.push(` * Hardware: ${template.config.hardware.recommended_gpu}`);
     lines.push(` * Training Time: ${template.config.hardware.estimated_training_time}`);
     lines.push(' * ');

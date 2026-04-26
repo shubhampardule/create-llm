@@ -142,7 +142,7 @@ const dummyTemplate = {
   }
 };
 
-for (const name of ['tiny', 'small', 'base', 'custom']) {
+for (const name of ['nano', 'tiny', 'small', 'base', 'custom']) {
   const templateCopy = JSON.parse(JSON.stringify(dummyTemplate));
   templateCopy.name = name;
   fs.writeFileSync(path.join(tempDir, `${name}.json`), JSON.stringify(templateCopy, null, 2));

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "node dist/index.js test-project --template nano",
+    "test": "npm run build && node dist/run-tests.js",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

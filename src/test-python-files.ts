@@ -27,6 +27,19 @@ let failed = 0;
 
 async function runTests() {
   try {
+    const getExpectedDataSize = (parameters: number): string => {
+      if (parameters < 10_000_000) {
+        return '1MB-10MB';
+      }
+      if (parameters < 100_000_000) {
+        return '10MB-100MB';
+      }
+      if (parameters < 500_000_000) {
+        return '100MB-1GB';
+      }
+      return '1GB+';
+    };
+
     // Test 1: Generate files without plugins
     console.log(chalk.cyan('Test 1: Generate files without plugins...'));
     const config1: ProjectConfig = {
@@ -105,13 +118,14 @@ async function runTests() {
     // Check sample data
     const samplePath = path.join(testProjectPath, 'data/raw/sample.txt');
     const sampleContent = fs.readFileSync(samplePath, 'utf-8');
+    const tinyModelSize = (template1.config.model.parameters / 1_000_000).toFixed(0);
 
     const sampleChecks = [
       { check: sampleContent.includes('Sample Training Data'), desc: 'Title' },
       { check: sampleContent.includes('TINY Template'), desc: 'Template name' },
-      { check: sampleContent.includes('10M parameters'), desc: 'Model size' },
+      { check: sampleContent.includes(`${tinyModelSize}M parameters`), desc: 'Model size' },
       { check: sampleContent.includes('Data Quality Guidelines'), desc: 'Guidelines section' },
-      { check: sampleContent.includes('Example Domains'), desc: 'Domains section' },
+      { check: sampleContent.includes('Example Training Domains'), desc: 'Domains section' },
       { check: sampleContent.includes('Next Steps'), desc: 'Next steps' }
     ];
 
@@ -175,12 +189,14 @@ async function runTests() {
     console.log(chalk.cyan('\nTest 3: Verify template-specific sample data...'));
     const samplePath2 = path.join(testProjectPath, 'data/raw/sample.txt');
     const sampleContent2 = fs.readFileSync(samplePath2, 'utf-8');
+    const smallModelSize = (template2.config.model.parameters / 1_000_000).toFixed(0);
+    const expectedDataSize = getExpectedDataSize(template2.config.model.parameters);
 
     const templateChecks = [
       { check: sampleContent2.includes('SMALL Template'), desc: 'Small template name' },
-      { check: sampleContent2.includes('100M parameters'), desc: 'Small model size' },
-      { check: sampleContent2.includes('100MB-1GB'), desc: 'Small data size' },
-      { check: sampleContent2.includes('NVIDIA RTX 3060'), desc: 'Small hardware' }
+      { check: sampleContent2.includes(`${smallModelSize}M parameters`), desc: 'Small model size' },
+      { check: sampleContent2.includes(expectedDataSize), desc: 'Small data size' },
+      { check: sampleContent2.includes(template2.config.hardware.recommended_gpu), desc: 'Small hardware' }
     ];
 
     let allTemplateChecks = true;

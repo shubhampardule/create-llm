@@ -33,7 +33,12 @@ async function runTests() {
     const templateManager = new TemplateManager();
     const templates = templateManager.getAvailableTemplates();
     
-    if (templates.length === 4 && templates.includes('tiny') && templates.includes('small')) {
+    if (
+      templates.length === 5 &&
+      templates.includes('nano') &&
+      templates.includes('tiny') &&
+      templates.includes('small')
+    ) {
       console.log(chalk.green('✓ Template Manager working'));
       passed++;
     } else {

@@ -120,11 +120,12 @@ async function runTests() {
     console.log(chalk.cyan('\nTest 4: Verifying README content...'));
     const readmePath = path.join(testProjectPath, 'README.md');
     const readmeContent = fs.readFileSync(readmePath, 'utf-8');
+    const expectedModelSize = (template.config.model.parameters / 1_000_000).toFixed(1);
 
     const readmeChecks = [
       { check: readmeContent.includes(testProjectName), desc: 'Project name' },
       { check: readmeContent.includes('TINY'), desc: 'Template name' },
-      { check: readmeContent.includes('10M parameters'), desc: 'Model size' },
+      { check: readmeContent.includes(`~${expectedModelSize}M parameters`), desc: 'Model size' },
       { check: readmeContent.includes('BPE'), desc: 'Tokenizer type' },
       { check: readmeContent.includes('Quick Start'), desc: 'Quick start section' },
       { check: readmeContent.includes('Training Tips'), desc: 'Training tips' }

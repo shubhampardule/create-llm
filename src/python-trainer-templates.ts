@@ -93,6 +93,32 @@ class Trainer:
         print(f"Trainer initialized on device: {self.device}")
         print(f"Mixed precision: {self.use_amp}")
         print(f"Gradient accumulation steps: {self.gradient_accumulation_steps}")
+
+        # Detect model type for batch adaptation
+        model_class = type(self.model).__name__
+        if 'T5' in model_class:
+            self._model_type = 't5'
+            print(f"Model type detected: T5 (encoder-decoder — will auto-create decoder_input_ids)")
+        elif 'BERT' in model_class:
+            self._model_type = 'bert'
+            print(f"Model type detected: BERT (encoder-only)")
+        else:
+            self._model_type = 'gpt'
+
+    def _prepare_batch(self, batch):
+        """
+        Adapt batch dict to the model's forward signature.
+        - GPT:  keeps input_ids + labels as-is
+        - BERT: keeps input_ids + labels (masked LM labels)
+        - T5:   creates decoder_input_ids from right-shifted labels
+        """
+        if self._model_type == 't5' and 'decoder_input_ids' not in batch:
+            labels = batch.get('labels', batch.get('input_ids'))
+            # Right-shift labels to create decoder input: [pad, tok0, tok1, ...]
+            pad_id = getattr(self.model.config, 'pad_token_id', 0)
+            decoder_input = torch.full_like(labels[:, :1], pad_id)
+            batch['decoder_input_ids'] = torch.cat([decoder_input, labels[:, :-1]], dim=1)
+        return batch
     
     def _create_optimizer(self) -> torch.optim.Optimizer:
         """Create optimizer with weight decay"""
@@ -238,6 +264,9 @@ class Trainer:
         """Single training step with gradient accumulation"""
         # Move batch to device
         batch = {k: v.to(self.device) for k, v in batch.items()}
+
+        # Adapt batch for model type (e.g. create decoder_input_ids for T5)
+        batch = self._prepare_batch(batch)
         
         # Forward pass with mixed precision
         if self.use_amp:
@@ -303,6 +332,7 @@ class Trainer:
         print("\\nEvaluating...")
         for batch in tqdm(self.val_loader, desc="Validation", leave=False):
             batch = {k: v.to(self.device) for k, v in batch.items()}
+            batch = self._prepare_batch(batch)
             
             outputs = self.model(**batch)
             total_loss += outputs['loss'].item()

@@ -307,6 +307,7 @@ async function runTests() {
     
     // Check checkpoint existence check
     testCheck(
+      chatContent.includes('if not checkpoint_path.exists():') ||
       chatContent.includes('if not Path(args.checkpoint).exists():'),
       'Checkpoint existence validation'
     );

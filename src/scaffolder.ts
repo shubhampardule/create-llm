@@ -5,6 +5,7 @@ import chalk from 'chalk';
 import { Template } from './types/template';
 import { ProjectConfig } from './prompts';
 import { ConfigGenerator } from './config-generator';
+import { formatParameterCount } from './formatters';
 
 /**
  * ScaffolderEngine creates the project structure and files
@@ -85,7 +86,29 @@ export class ScaffolderEngine {
             fs.mkdirSync(dir, { recursive: true });
         }
 
-        fs.writeFileSync(fullPath, content, 'utf-8');
+        this.writeFileWithRetry(fullPath, content);
+    }
+
+    /**
+     * Retry file writes on transient Windows filesystem errors.
+     */
+    private writeFileWithRetry(fullPath: string, content: string, attempts = 5): void {
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                fs.writeFileSync(fullPath, content, 'utf-8');
+                return;
+            } catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                const isTransient = code === 'EBUSY' || code === 'EPERM';
+
+                if (!isTransient || attempt === attempts) {
+                    throw error;
+                }
+
+                // Briefly pause to let Windows release filesystem locks.
+                Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+            }
+        }
     }
 
     /**
@@ -136,6 +159,16 @@ export class ScaffolderEngine {
 
         // Create model architecture files
         this.createFile('models/architectures/gpt.py', PythonTemplates.getGPTArchitecture());
+
+        // Only generate BERT/T5 architectures when the template uses them
+        // Custom templates may use any architecture, so include both for custom
+        const isCustom = config.template === 'custom';
+        if (template.config.model.type === 'bert' || isCustom) {
+            this.createFile('models/architectures/bert.py', PythonTemplates.getBERTArchitecture());
+        }
+        if (template.config.model.type === 't5' || isCustom) {
+            this.createFile('models/architectures/t5.py', PythonTemplates.getT5Architecture());
+        }
         this.createFile('models/architectures/nano.py', PythonTemplates.getNanoModel());
         this.createFile('models/architectures/tiny.py', PythonTemplates.getTinyModel());
         this.createFile('models/architectures/small.py', PythonTemplates.getSmallModel());
@@ -648,6 +681,12 @@ import json
 from pathlib import Path
 from tqdm import tqdm
 
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -916,6 +955,12 @@ import argparse
 import sys
 import torch
 from pathlib import Path
+
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1217,6 +1262,12 @@ import sys
 import torch
 from pathlib import Path
 from typing import Optional
+
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1675,6 +1726,12 @@ import sys
 import torch
 from pathlib import Path
 from typing import List, Tuple, Optional
+
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -2257,6 +2314,12 @@ import os
 from pathlib import Path
 from typing import Optional
 
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -2691,6 +2754,12 @@ from typing import List, Dict, Any
 from datetime import datetime
 from tabulate import tabulate
 
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -2776,7 +2845,7 @@ class ModelComparator:
         info = {
             'step': checkpoint.get('step', 'unknown'),
             'epoch': checkpoint.get('epoch', 'unknown'),
-            'loss': checkpoint.get('loss', 'unknown'),
+            'checkpoint_loss': checkpoint.get('loss', 'unknown'),
         }
         
         print(f"✓ Loaded (step: {info['step']}, epoch: {info['epoch']})")
@@ -2796,8 +2865,9 @@ class ModelComparator:
         """
         print(f"\\n📈 Evaluating {model_name}...")
         
-        # Create validation dataloader
-        val_dataset = LLMDataset(str(self.val_data_path), max_length=512)
+        # Match validation sequence length to the model's configured context window
+        max_length = model.config.max_length if hasattr(model, 'config') else 512
+        val_dataset = LLMDataset(str(self.val_data_path), max_length=max_length)
         val_loader = create_dataloader(val_dataset, batch_size=8, shuffle=False)
         
         total_loss = 0.0
@@ -3334,7 +3404,7 @@ To use your own data, simply replace this file with your training text. You can 
 
 The ${template.name.toUpperCase()} template is designed for ${template.config.hardware.can_run_on_cpu ? 'quick experimentation and learning' : 'production-grade training'}:
 - Recommended data size: ${minDataSize} of text
-- Model size: ${(template.config.model.parameters / 1_000_000).toFixed(0)}M parameters  
+- Model size: ${formatParameterCount(template.config.model.parameters)} parameters  
 - Hardware: ${template.config.hardware.recommended_gpu}
 - Training time: ${template.config.hardware.estimated_training_time}
 
@@ -3450,6 +3520,19 @@ Good luck with your language model training!
         const hardware = template.config.hardware.recommended_gpu;
         const trainingTime = template.config.hardware.estimated_training_time;
         const cpuFriendly = template.config.hardware.can_run_on_cpu;
+        const architectureLines = [
+            '│   │   ├── gpt.py             # Shared GPT transformer building blocks',
+            '│   │   ├── nano.py            # Nano GPT preset',
+            '│   │   ├── tiny.py            # Tiny GPT preset',
+            '│   │   ├── small.py           # Small GPT preset',
+            '│   │   └── base.py            # Base GPT preset'
+        ];
+        if (template.config.model.type === 'bert' || config.template === 'custom') {
+            architectureLines.splice(1, 0, '│   │   ├── bert.py            # BERT encoder architecture');
+        }
+        if (template.config.model.type === 't5' || config.template === 'custom') {
+            architectureLines.splice(architectureLines.length - 1, 0, '│   │   ├── t5.py              # T5 encoder-decoder architecture');
+        }
         const minData = config.template === 'nano' ? '100+' :
             config.template === 'tiny' ? '1,000+' :
                 config.template === 'small' ? '10,000+' : '100,000+';
@@ -3623,11 +3706,7 @@ ${config.projectName}/
 │
 ├── 📂 models/
 │   ├── architectures/
-│   │   ├── gpt.py             # GPT architecture implementation
-│   │   ├── nano.py            # 1M parameter model
-│   │   ├── tiny.py            # 6M parameter model
-│   │   ├── small.py           # 100M parameter model
-│   │   └── base.py            # 1B parameter model
+${architectureLines.join('\n')}
 │   ├── __init__.py
 │   └── config.py              # Configuration loader
 │

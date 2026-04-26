@@ -8,13 +8,14 @@ import { TemplateManager } from './template-manager';
 import { TemplateName, Template } from './types/template';
 import { CLIPrompts, ProjectConfig } from './prompts';
 import { ScaffolderEngine } from './scaffolder';
+import { formatParameterCount } from './formatters';
 
 /**
  * Display enhanced post-install message with next steps and guidance
  */
 function displayNextSteps(config: ProjectConfig, template: Template): void {
   const { projectName, plugins } = config;
-  const modelSize = (template.config.model.parameters / 1_000_000).toFixed(0);
+  const modelSize = formatParameterCount(template.config.model.parameters);
   const templateName = config.template.toUpperCase();
   
   // Header
@@ -26,7 +27,7 @@ function displayNextSteps(config: ProjectConfig, template: Template): void {
   console.log(chalk.cyan.bold('\n📦 Project Details:'));
   console.log(chalk.gray('─'.repeat(70)));
   console.log(chalk.white(`  📁 Location:     ${chalk.bold('./' + projectName)}`));
-  console.log(chalk.white(`  🎯 Template:     ${chalk.bold(templateName)} (${modelSize}M parameters)`));
+  console.log(chalk.white(`  🎯 Template:     ${chalk.bold(templateName)} (${modelSize} parameters)`));
   console.log(chalk.white(`  🤖 Model:        ${chalk.bold(template.config.model.type.toUpperCase())}`));
   console.log(chalk.white(`  📝 Tokenizer:    ${chalk.bold(config.tokenizer.toUpperCase())}`));
   console.log(chalk.white(`  💾 Hardware:     ${chalk.bold(template.config.hardware.recommended_gpu || 'CPU-friendly')}`));
@@ -142,20 +143,71 @@ function displayNextSteps(config: ProjectConfig, template: Template): void {
   console.log(chalk.gray('  💬 Need help? Check the README or open an issue on GitHub\n'));
 }
 
+/**
+ * Display a formatted table of all available templates
+ */
+function displayTemplateList(): void {
+  const templates = templateManager.getAllTemplates();
+
+  console.log('\n' + chalk.cyan('═'.repeat(70)));
+  console.log(chalk.cyan.bold('  📋 Available Templates'));
+  console.log(chalk.cyan('═'.repeat(70)) + '\n');
+
+  for (const t of templates) {
+    const { model, hardware, documentation } = t.config;
+    const params = formatParameterCount(model.parameters);
+    const cpu     = hardware.can_run_on_cpu
+      ? chalk.green('✓ CPU-friendly')
+      : chalk.yellow(`GPU: ${hardware.recommended_gpu}`);
+
+    console.log(chalk.bold.white(`  ${t.name.toUpperCase().padEnd(8)}`) + chalk.gray(`  ${model.type.toUpperCase()} · ${params} params`));
+    console.log(chalk.white(`  ${documentation.description}`));
+    console.log(chalk.gray(`  RAM: ${hardware.min_ram.padEnd(6)}  ${cpu}  ⏱  ${hardware.estimated_training_time}`));
+
+    // Use cases (first 3)
+    const cases = documentation.use_cases.slice(0, 3).join(chalk.gray(' · '));
+    console.log(chalk.gray(`  Use cases: ${cases}`));
+
+    console.log(chalk.gray('  ' + '─'.repeat(66)));
+  }
+
+  console.log(chalk.white('  Usage:'));
+  console.log(chalk.cyan('    npx create-llm my-project --template <name>\n'));
+}
+
 const program = new Command();
 const templateManager = new TemplateManager();
 const prompts = new CLIPrompts(templateManager);
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { version } = require('../package.json') as { version: string };
+
+// `create-llm list` subcommand
+program
+  .command('list')
+  .description('List all available templates with their details')
+  .action(() => {
+    displayTemplateList();
+  });
+
 program
   .name('create-llm')
   .description('CLI tool to scaffold LLM training projects')
-  .version('0.1.0')
+  .version(version)
   .argument('[project-name]', 'Name of the project to create')
-  .option('-t, --template <template>', 'Template to use (tiny, small, base, custom)')
+  .option('-t, --template <template>', 'Template to use (nano, tiny, small, base, custom)')
   .option('--tokenizer <type>', 'Tokenizer type (bpe, wordpiece, unigram)')
   .option('--skip-install', 'Skip dependency installation')
-  .option('-y, --yes', 'Skip confirmation prompt')
+  .option('-y, --yes', 'Skip all prompts and use defaults (name: my-llm, template: small, tokenizer: bpe, plugins: none)')
+  .option('-l, --list', 'List all available templates and exit')
+  .option('-f, --force', 'Overwrite the target directory if it already exists')
   .action(async (projectName: string | undefined, options) => {
+    // --list flag: print table and exit without prompting
+    if (options.list) {
+      displayTemplateList();
+      process.exit(0);
+    }
+
     console.log(chalk.blue.bold('\n🚀 Welcome to create-llm!\n'));
 
     try {
@@ -185,7 +237,8 @@ program
         projectName,
         options.template as TemplateName,
         options.tokenizer,
-        options.skipInstall
+        options.skipInstall,
+        options.yes
       );
 
       if (!config) {
@@ -198,9 +251,19 @@ program
       // Check if directory already exists
       const projectPath = path.join(process.cwd(), config.projectName);
       if (fs.existsSync(projectPath)) {
-        console.error(chalk.red(`\n❌ Directory "${config.projectName}" already exists`));
-        console.log(chalk.yellow('Please choose a different project name or remove the existing directory'));
-        process.exit(1);
+        if (options.force) {
+          console.log(chalk.yellow(`\n⚠️  Directory "${config.projectName}" already exists — overwriting (--force)\n`));
+          fs.rmSync(projectPath, {
+            recursive: true,
+            force: true,
+            maxRetries: 10,
+            retryDelay: 100
+          });
+        } else {
+          console.error(chalk.red(`\n❌ Directory "${config.projectName}" already exists`));
+          console.log(chalk.yellow('Use --force to overwrite it, or choose a different project name'));
+          process.exit(1);
+        }
       }
 
       // Create scaffolder

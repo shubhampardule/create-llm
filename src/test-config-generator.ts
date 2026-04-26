@@ -20,6 +20,8 @@ let failed = 0;
 // Test 1: Generate config for tiny template
 console.log(chalk.cyan('Test 1: Generate config for tiny template...'));
 try {
+  const template = templateManager.getTemplate('tiny');
+  const tinyModel = template.config.model;
   const config: ProjectConfig = {
     projectName: 'test-project',
     template: 'tiny',
@@ -27,7 +29,6 @@ try {
     plugins: [],
     skipInstall: false
   };
-  const template = templateManager.getTemplate('tiny');
   const configContent = configGenerator.generateConfig(config, template);
 
   // Verify content
@@ -35,10 +36,10 @@ try {
     { check: configContent.includes('module.exports'), desc: 'Module exports' },
     { check: configContent.includes("type: 'gpt'"), desc: 'Model type' },
     { check: configContent.includes("size: 'tiny'"), desc: 'Template size' },
-    { check: configContent.includes('vocab_size: 32000'), desc: 'Vocab size' },
-    { check: configContent.includes('layers: 6'), desc: 'Layers' },
-    { check: configContent.includes('heads: 6'), desc: 'Heads' },
-    { check: configContent.includes('dim: 384'), desc: 'Dimension' },
+    { check: configContent.includes(`vocab_size: ${tinyModel.vocab_size}`), desc: 'Vocab size' },
+    { check: configContent.includes(`layers: ${tinyModel.layers}`), desc: 'Layers' },
+    { check: configContent.includes(`heads: ${tinyModel.heads}`), desc: 'Heads' },
+    { check: configContent.includes(`dim: ${tinyModel.dim}`), desc: 'Dimension' },
     { check: configContent.includes('batch_size: 16'), desc: 'Batch size' },
     { check: configContent.includes('learning_rate: 0.0006'), desc: 'Learning rate' },
     { check: configContent.includes("tokenizer: {"), desc: 'Tokenizer section' },
@@ -71,6 +72,9 @@ try {
 // Test 2: Generate config for small template
 console.log(chalk.cyan('\nTest 2: Generate config for small template...'));
 try {
+  const template = templateManager.getTemplate('small');
+  const smallModel = template.config.model;
+  const smallTraining = template.config.training;
   const config: ProjectConfig = {
     projectName: 'test-project',
     template: 'small',
@@ -78,17 +82,16 @@ try {
     plugins: [],
     skipInstall: false
   };
-  const template = templateManager.getTemplate('small');
   const configContent = configGenerator.generateConfig(config, template);
 
   const checks = [
     { check: configContent.includes("size: 'small'"), desc: 'Small template' },
-    { check: configContent.includes('layers: 12'), desc: 'Small layers' },
-    { check: configContent.includes('heads: 12'), desc: 'Small heads' },
-    { check: configContent.includes('dim: 768'), desc: 'Small dimension' },
-    { check: configContent.includes('batch_size: 32'), desc: 'Small batch size' },
+    { check: configContent.includes(`layers: ${smallModel.layers}`), desc: 'Small layers' },
+    { check: configContent.includes(`heads: ${smallModel.heads}`), desc: 'Small heads' },
+    { check: configContent.includes(`dim: ${smallModel.dim}`), desc: 'Small dimension' },
+    { check: configContent.includes(`batch_size: ${smallTraining.batch_size}`), desc: 'Small batch size' },
     { check: configContent.includes("type: 'wordpiece'"), desc: 'WordPiece tokenizer' },
-    { check: configContent.includes('mixed_precision: true'), desc: 'Mixed precision enabled' }
+    { check: configContent.includes(`mixed_precision: ${smallTraining.mixed_precision}`), desc: 'Mixed precision enabled' }
   ];
 
   let allChecks = true;
